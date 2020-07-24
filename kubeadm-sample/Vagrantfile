@@ -1,0 +1,146 @@
+BOX_IMAGE    = "localgod/centos"
+BOX_VERSION  = "7.6.1810"
+MASTER_COUNT = 3
+NODE_COUNT   = 3
+
+MASTER_IP    = "192.168.26.10"
+MASTER_PORT  = "8443"
+NODE_IP_NW   = "192.168.26."
+POD_NW_CIDR  = "10.244.0.0/16"
+
+KUBE_VER   = "1.17.4"
+KUBE_TOKEN = "ayngk7.m1555duk5x2i3ctt"
+IMAGE_REPO = "registry.aliyuncs.com/google_containers"
+
+init_script = <<SCRIPT
+#!/bin/bash -e
+
+## Disable swap
+sudo swapoff -a
+## Allow IPv4/IPv6 traffic on the bridge
+sudo sh -c "cat <<EOF > /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+vm.swappiness = 0
+EOF"
+sudo sysctl --system
+
+## Disable SELinux
+sudo setenforce 0 || true
+sudo sed -i 's/^SELINUX=.*/SELINUX=permissive/' /etc/selinux/config
+
+# Install Docker
+## Remove existing packages
+sudo yum remove docker \
+    docker-client \
+    docker-client-latest \
+    docker-common \
+    docker-latest \
+    docker-latest-logrotate \
+    docker-logrotate \
+    docker-engine
+## Install the packages required to install Docker CE
+sudo yum install -y yum-utils \
+    device-mapper-persistent-data lvm2
+## Registering a yum repository for Docker CE
+sudo yum-config-manager \
+    --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+## Install Docker CE
+sudo yum makecache fast  ## Update index
+sudo yum update -y ## Update Package
+sudo yum install \
+    -y docker-ce-18.09.6-3.el7.x86_64 docker-ce-cli-18.09.6-3.el7.x86_64 containerd.io
+sudo mkdir /etc/docker
+sudo sh -c "cat <<EOF > /etc/docker/daemon.json
+{
+    \"exec-opts\": [\"native.cgroupdriver=systemd\"],
+    \"log-driver\": \"json-file\",
+    \"log-opts\": {
+        \"max-size\": \"100m\"
+    },
+    \"storage-driver\": \"overlay2\",
+    \"storage-opts\": [
+        \"overlay2.override_kernel_check=true\"
+    ]
+}
+EOF"
+sudo mkdir -p /etc/systemd/system/docker.service.d
+## Up Docker
+sudo systemctl enable docker
+sudo systemctl daemon-reload
+sudo systemctl start docker
+
+## Register kubernetes package repository
+sudo sh -c "cat <<EOF > /etc/yum.repos.d/kubernetes.repo
+[kubernetes]
+name=Kubernetes
+baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+exclude=kube*
+EOF"
+
+## Install & configure kubelet
+sudo yum install -y kubelet kubeadm kubectl --disableexcludes=kubernetes
+sudo docker info | grep Cgroup  ## check cgroup driver
+sudo mkdir /var/lib/kubelet
+sudo sh -c "cat <<EOF > /var/lib/kubelet/config.yaml
+kind: KubeletConfiguration
+apiVersion: kubelet.config.k8s.io/v1beta1
+cgroupDriver: \"systemd\"  # Same as Docker's cgroup driver
+EOF"
+
+## Kubelet service option config
+sudo mkdir /etc/systemd/system/kubelet.service.d
+sudo sh -c "cat <<EOF > /etc/systemd/system/kubelet.service.d/20-extra-args.conf
+[Service]
+Environment="KUBELET_EXTRA_ARGS=-fail-swap-on=false"
+EOF"
+sudo systemctl enable --now kubelet
+# sudo systemctl daemon-reload
+SCRIPT
+
+# TODO: use only master_script even if HA
+ha_script = <<SCRIPT
+echo foo
+SCRIPT
+
+Vagrant.configure("2") do |config|
+    config.vm.box = BOX_IMAGE
+    config.vm.box_version = BOX_VERSION
+    config.vm.box_check_update = false
+  
+    config.vm.provider "virtualbox" do |l|
+      l.cpus = 1
+      l.memory = "1024"
+    end
+  
+    config.vm.provision :shell, inline: init_script
+  
+    # config.hostmanager.enabled = true
+    # config.hostmanager.manage_guest = true
+  
+    (1..MASTER_COUNT).each do |i|
+      ha = MASTER_COUNT > 1
+      hostname= "master#{ha ? i: ''}"
+      config.vm.define(hostname) do |subconfig|
+        subconfig.vm.hostname = hostname
+        subconfig.vm.network :private_network, nic_type: "virtio", ip: ha ? NODE_IP_NW + "#{i + 10}" : MASTER_IP
+        subconfig.vm.provider :virtualbox do |vb|
+          vb.customize ["modifyvm", :id, "--cpus", "2"]
+          vb.customize ["modifyvm", :id, "--memory", "2048"]
+        end
+        subconfig.vm.provision :shell, inline: ha ? ha_script : master_script
+      end
+    end
+  
+    (1..NODE_COUNT).each do |i|
+      config.vm.define("node#{i}") do |subconfig|
+        subconfig.vm.hostname = "node#{i}"
+        subconfig.vm.network :private_network, nic_type: "virtio", ip: NODE_IP_NW + "#{i + 20}"
+        # subconfig.vm.provision :shell, inline: node_script
+      end
+    end
+  end
