@@ -1,120 +1,93 @@
-BOX_IMAGE    = "localgod/centos"
-BOX_VERSION  = "7.6.1810"
-MASTER_COUNT = 3
-NODE_COUNT   = 3
+BOX_IMAGE    = "bento/ubuntu-18.04"
+# BOX_VERSION  = "7.6.1810"
+MASTER_COUNT = 1
+NODE_COUNT   = 1
 
-MASTER_IP    = "192.168.26.10"
-MASTER_PORT  = "8443"
+# MASTER_IP    = "192.168.26.10"
+# MASTER_PORT  = "8443"
 NODE_IP_NW   = "192.168.26."
-POD_NW_CIDR  = "10.244.0.0/16"
-
-KUBE_VER   = "1.17.4"
-KUBE_TOKEN = "ayngk7.m1555duk5x2i3ctt"
-IMAGE_REPO = "registry.aliyuncs.com/google_containers"
+# POD_NW_CIDR  = "10.244.0.0/16"
 
 init_script = <<SCRIPT
 #!/bin/bash -e
 
-## Disable swap
+# Disable swap
 sudo swapoff -a
-## Allow IPv4/IPv6 traffic on the bridge
-sudo sh -c "cat <<EOF > /etc/sysctl.d/k8s.conf
-net.bridge.bridge-nf-call-ip6tables = 1
-net.bridge.bridge-nf-call-iptables = 1
-vm.swappiness = 0
-EOF"
-sudo sysctl --system
 
-## Disable SELinux
-sudo setenforce 0 || true
-sudo sed -i 's/^SELINUX=.*/SELINUX=permissive/' /etc/selinux/config
+# Install Docker CE
+## Setup repository
+### Update apt index
+sudo apt-get update
 
-# Install Docker
-## Remove existing packages
-sudo yum remove docker \
-    docker-client \
-    docker-client-latest \
-    docker-common \
-    docker-latest \
-    docker-latest-logrotate \
-    docker-logrotate \
-    docker-engine
-## Install the packages required to install Docker CE
-sudo yum install -y yum-utils \
-    device-mapper-persistent-data lvm2
-## Registering a yum repository for Docker CE
-sudo yum-config-manager \
-    --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-## Install Docker CE
-sudo yum makecache fast  ## Update index
-sudo yum update -y ## Update Package
-sudo yum install \
-    -y docker-ce-18.09.6-3.el7.x86_64 docker-ce-cli-18.09.6-3.el7.x86_64 containerd.io
-sudo mkdir /etc/docker
-sudo sh -c "cat <<EOF > /etc/docker/daemon.json
+### Install packages
+sudo apt-get update
+sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
+
+### Add Docker official GPG key
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+
+### Add docker apt repository
+sudo add-apt-repository \
+    "deb [arch=amd64] https://download.docker.com/linux/ubuntu \
+    $(lsb_release -cs) \
+    stable"
+
+## Install docker ce
+sudo apt-get update
+sudo apt-get install -y docker-ce=18.06.2~ce~3-0~ubuntu
+
+# Setup daemon
+sudo mkdir -p /etc/docker
+sudo bash -c "cat <<EOF > /etc/docker/daemon.json 
 {
-    \"exec-opts\": [\"native.cgroupdriver=systemd\"],
-    \"log-driver\": \"json-file\",
-    \"log-opts\": {
-        \"max-size\": \"100m\"
-    },
-    \"storage-driver\": \"overlay2\",
-    \"storage-opts\": [
-        \"overlay2.override_kernel_check=true\"
-    ]
+  \\"exec-opts\\": [\\"native.cgroupdriver=systemd\\"],
+  \\"log-driver\\": \\"json-file\\",
+  \\"log-opts\\": {
+    \\"max-size\\": \\"100m\\"
+  },
+  \\"storage-driver\\": \\"overlay2\\"
 }
 EOF"
+
 sudo mkdir -p /etc/systemd/system/docker.service.d
-## Up Docker
-sudo systemctl enable docker
+
+# Restart docker
 sudo systemctl daemon-reload
-sudo systemctl start docker
+sudo systemctl restart docker
 
-## Register kubernetes package repository
-sudo sh -c "cat <<EOF > /etc/yum.repos.d/kubernetes.repo
-[kubernetes]
-name=Kubernetes
-baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
-enabled=1
-gpgcheck=1
-repo_gpgcheck=1
-gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
-exclude=kube*
-EOF"
 
-## Install & configure kubelet
-sudo yum install -y kubelet kubeadm kubectl --disableexcludes=kubernetes
-sudo docker info | grep Cgroup  ## check cgroup driver
-sudo mkdir /var/lib/kubelet
-sudo sh -c "cat <<EOF > /var/lib/kubelet/config.yaml
-kind: KubeletConfiguration
-apiVersion: kubelet.config.k8s.io/v1beta1
-cgroupDriver: \"systemd\"  # Same as Docker's cgroup driver
-EOF"
-
-## Kubelet service option config
-sudo mkdir /etc/systemd/system/kubelet.service.d
-sudo sh -c "cat <<EOF > /etc/systemd/system/kubelet.service.d/20-extra-args.conf
-[Service]
-Environment="KUBELET_EXTRA_ARGS=-fail-swap-on=false"
-EOF"
-sudo systemctl enable --now kubelet
-# sudo systemctl daemon-reload
+# Install Kubelet & Kubeadm
+sudo apt-get update && sudo apt-get install -y apt-transport-https curl
+curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
+cat <<EOF | sudo tee /etc/apt/sources.list.d/kubernetes.list
+deb https://apt.kubernetes.io/ kubernetes-xenial main
+EOF
+sudo apt-get update
+sudo apt-get install -y kubelet kubeadm kubectl
+sudo apt-mark hold kubelet kubeadm kubectl
 SCRIPT
 
-# TODO: use only master_script even if HA
-ha_script = <<SCRIPT
-echo foo
+master_script = <<SCRIPT
+#!/bin/bash -e
+
+sudo kubeadm init --control-plane-endpoint $(ifconfig eth1 | awk -F ' *|:' '/inet /{print $3}')
+sudo mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+# Install Calico
+kubectl apply -f https://docs.projectcalico.org/v3.11/manifests/calico.yaml
 SCRIPT
 
 Vagrant.configure("2") do |config|
     config.vm.box = BOX_IMAGE
-    config.vm.box_version = BOX_VERSION
-    config.vm.box_check_update = false
+    # config.vm.box_version = BOX_VERSION
+    # config.vm.box_check_update = false
+    config.vm.boot_timeout = 600
   
     config.vm.provider "virtualbox" do |l|
-      l.cpus = 1
-      l.memory = "1024"
+        l.cpus = 1
+        l.memory = "1024"
     end
   
     config.vm.provision :shell, inline: init_script
@@ -123,24 +96,27 @@ Vagrant.configure("2") do |config|
     # config.hostmanager.manage_guest = true
   
     (1..MASTER_COUNT).each do |i|
-      ha = MASTER_COUNT > 1
-      hostname= "master#{ha ? i: ''}"
-      config.vm.define(hostname) do |subconfig|
-        subconfig.vm.hostname = hostname
-        subconfig.vm.network :private_network, nic_type: "virtio", ip: ha ? NODE_IP_NW + "#{i + 10}" : MASTER_IP
-        subconfig.vm.provider :virtualbox do |vb|
-          vb.customize ["modifyvm", :id, "--cpus", "2"]
-          vb.customize ["modifyvm", :id, "--memory", "2048"]
+        hostname= "master#{i}"
+        config.vm.define(hostname) do |subconfig|
+            subconfig.vm.hostname = hostname
+            # 何故か↓だと ssh がタイムアウトする。
+            # subconfig.vm.network :private_network, nic_type: "virtio", ip: NODE_IP_NW + "#{i + 10}", virtualbox__intnet: "intnet"
+            subconfig.vm.network "private_network", ip: NODE_IP_NW + "#{i + 10}", virtualbox__intnet: "intnet"
+            subconfig.vm.provider :virtualbox do |vb|
+                vb.customize ["modifyvm", :id, "--cpus", "2"]
+                vb.customize ["modifyvm", :id, "--memory", "2048"]
+            end
+            subconfig.vm.provision :shell, inline: master_script
         end
-        subconfig.vm.provision :shell, inline: ha ? ha_script : master_script
-      end
     end
   
     (1..NODE_COUNT).each do |i|
-      config.vm.define("node#{i}") do |subconfig|
-        subconfig.vm.hostname = "node#{i}"
-        subconfig.vm.network :private_network, nic_type: "virtio", ip: NODE_IP_NW + "#{i + 20}"
-        # subconfig.vm.provision :shell, inline: node_script
-      end
+        config.vm.define("node#{i}") do |subconfig|
+            subconfig.vm.hostname = "node#{i}"
+            # 何故か↓だと ssh がタイムアウトする。
+            # subconfig.vm.network :private_network, nic_type: "virtio", ip: NODE_IP_NW + "#{i + 20}", virtualbox__intnet: "intnet"
+            subconfig.vm.network "private_network", ip: NODE_IP_NW + "#{i + 20}", virtualbox__intnet: "intnet"
+            # subconfig.vm.provision :shell, inline: node_script
+        end
     end
-  end
+end
